@@ -15,10 +15,12 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 const (
-	version       = "0.1.0"
+	version       = "0.2.0"
 	defaultBase   = "https://eisencode.waivy.dev/api/v1"
 	defaultModel  = "eisenberg/glm-5.3-flash"
 	brand         = "eisencode"
@@ -117,9 +119,14 @@ func doJSON(cfg Config, method, path string, body any, out any) error {
 
 func errMessage(data []byte, status int) string {
 	var e struct {
-		Error json.RawMessage `json:"error"`
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
 	}
-	if json.Unmarshal(data, &e) == nil && len(e.Error) > 0 {
+	_ = json.Unmarshal(data, &e)
+	if e.Message != "" {
+		return e.Message
+	}
+	if len(e.Error) > 0 {
 		var s string
 		if json.Unmarshal(e.Error, &s) == nil && s != "" {
 			return s
@@ -133,9 +140,9 @@ func errMessage(data []byte, status int) string {
 	}
 	switch status {
 	case 401:
-		return "invalid or revoked key — run: eisencode login <key>"
+		return "invalid or revoked key — run: eisencode login"
 	case 402:
-		return "insufficient credits — top up on https://eisencode.waivy.dev"
+		return "no credits on this key — top up at https://eisencode.waivy.dev/dashboard"
 	case 429:
 		return "rate limited — slow down (30 req/min per key)"
 	}
@@ -247,10 +254,11 @@ func cmdHelp() {
 	fmt.Printf(`%seisencode%sv%s — the API wall
 
 %sUSAGE%s
-  eisencode login <key>          save and verify your API key
-  eisencode logout              remove the saved key
-  eisencode key                 show key, plan, balance
-  eisencode models              list the 12 available models
+  eisencode login [key]          save and verify your API key (asks if omitted)
+  eisencode logout               remove the saved key
+  eisencode key                  show key, plan, balance
+  eisencode provider             show the eisenberg-series provider + base url
+  eisencode models               list the 12 available models
   eisencode run [prompt]        one-shot completion (reads stdin if no prompt)
   eisencode chat                interactive chat
   eisencode usage               recent requests + balance
@@ -279,60 +287,111 @@ func cmdHelp() {
 		ansiBold, ansiReset, configPath())
 }
 
+func isTTY() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+func askKey() string {
+	fmt.Printf("%sget a key%s at https://eisencode.waivy.dev/dashboard\n",
+		ansiDim, ansiReset)
+	fmt.Printf("%spaste your eisencode api key%s › ", ansiBlue, ansiReset)
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		if b, err := term.ReadPassword(fd); err == nil {
+			fmt.Println()
+			return strings.TrimSpace(string(b))
+		}
+	}
+	in := bufio.NewReader(os.Stdin)
+	line, _ := in.ReadString('\n')
+	return strings.TrimSpace(line)
+}
+
+func saveVerifiedKey(cfg *Config, key string) error {
+	cfg.APIKey = key
+	var info struct {
+		Service  string  `json:"service"`
+		Provider string  `json:"provider"`
+		Key      string  `json:"key"`
+		Plan     string  `json:"plan"`
+		Balance  float64 `json:"balance"`
+	}
+	if err := doJSON(*cfg, "GET", "/key", nil, &info); err != nil {
+		cfg.APIKey = ""
+		return err
+	}
+	if err := saveConfig(*cfg); err != nil {
+		return fmt.Errorf("could not save config: %w", err)
+	}
+	fmt.Printf("%s✓ logged in%s  key %s  plan %s  balance %.2f  provider %s\n",
+		ansiGreen, ansiReset, info.Key, info.Plan, info.Balance, info.Provider)
+	return nil
+}
+
 func cmdLogin(cfg *Config, key string) int {
 	key = strings.TrimSpace(key)
 	if key == "" {
-		fmt.Fprintln(os.Stderr, ansiRed+"usage: eisencode login <key>"+ansiReset)
+		if !isTTY() {
+			fmt.Fprintln(os.Stderr, ansiRed+"usage: eisencode login <key>"+ansiReset)
+			return 2
+		}
+		key = askKey()
+	}
+	if key == "" {
+		fmt.Fprintln(os.Stderr, ansiRed+"no key entered"+ansiReset)
 		return 2
 	}
-	cfg.APIKey = key
-	var info struct {
-		Service string  `json:"service"`
-		Key     string  `json:"key"`
-		Plan    string  `json:"plan"`
-		Balance float64 `json:"balance"`
-	}
-	if err := doJSON(*cfg, "GET", "/key", nil, &info); err != nil {
+	if err := saveVerifiedKey(cfg, key); err != nil {
 		fmt.Fprintln(os.Stderr, ansiRed+"key rejected: "+err.Error()+ansiReset)
 		return 1
 	}
-	if err := saveConfig(*cfg); err != nil {
-		fmt.Fprintln(os.Stderr, ansiRed+"could not save config: "+err.Error()+ansiReset)
-		return 1
-	}
-	fmt.Printf("%s✓ logged in%s  key %s  plan %s  balance %.2f\n",
-		ansiGreen, ansiReset, info.Key, info.Plan, info.Balance)
 	return 0
 }
 
-func requireKey(cfg Config) bool {
-	if strings.TrimSpace(cfg.APIKey) == "" {
-		fmt.Fprintln(os.Stderr, ansiRed+"no API key — get one at https://eisencode.waivy.dev then:"+ansiReset)
+// ensureKey checks for a saved key and, on a terminal, asks for one and saves it.
+func ensureKey(cfg *Config) bool {
+	if strings.TrimSpace(cfg.APIKey) != "" {
+		return true
+	}
+	if !isTTY() {
+		fmt.Fprintln(os.Stderr, ansiRed+"no API key — get one at https://eisencode.waivy.dev/dashboard"+ansiReset)
 		fmt.Fprintln(os.Stderr, "  eisencode login sk_eis_...")
+		return false
+	}
+	fmt.Printf("%sno api key yet.%s\n", ansiRed, ansiReset)
+	key := askKey()
+	if key == "" {
+		fmt.Fprintln(os.Stderr, ansiRed+"no key entered — nothing to do"+ansiReset)
+		return false
+	}
+	if err := saveVerifiedKey(cfg, key); err != nil {
+		fmt.Fprintln(os.Stderr, ansiRed+"key rejected: "+err.Error()+ansiReset)
 		return false
 	}
 	return true
 }
 
-func cmdKey(cfg Config) int {
-	if !requireKey(cfg) {
+func cmdKey(cfg *Config) int {
+	if !ensureKey(cfg) {
 		return 1
 	}
 	var info struct {
 		Service       string  `json:"service"`
+		Provider      string  `json:"provider"`
 		Key           string  `json:"key"`
 		Plan          string  `json:"plan"`
 		Balance       float64 `json:"balance"`
 		RequestsMonth int     `json:"requests_month"`
 		Active        bool    `json:"active"`
 	}
-	if err := doJSON(cfg, "GET", "/key", nil, &info); err != nil {
+	if err := doJSON(*cfg, "GET", "/key", nil, &info); err != nil {
 		fmt.Fprintln(os.Stderr, ansiRed+err.Error()+ansiReset)
 		return 1
 	}
-	fmt.Printf("%skey%s      %s\n%sservice%s  %s\n%splan%s     %s\n%sbalance%s  %.2f credits\n%smonth%s    %d requests\n",
+	fmt.Printf("%skey%s      %s\n%sservice%s  %s\n%sprovider%s %s\n%splan%s     %s\n%sbalance%s  %.2f credits\n%smonth%s    %d requests\n",
 		ansiBold, ansiReset, info.Key,
 		ansiBold, ansiReset, info.Service,
+		ansiBold, ansiReset, info.Provider,
 		ansiBold, ansiReset, info.Plan,
 		ansiBold, ansiReset, info.Balance,
 		ansiBold, ansiReset, info.RequestsMonth)
@@ -345,12 +404,12 @@ type modelList struct {
 	} `json:"data"`
 }
 
-func cmdModels(cfg Config, asJSON bool) int {
-	if !requireKey(cfg) {
+func cmdModels(cfg *Config, asJSON bool) int {
+	if !ensureKey(cfg) {
 		return 1
 	}
 	var ml modelList
-	if err := doJSON(cfg, "GET", "/models", nil, &ml); err != nil {
+	if err := doJSON(*cfg, "GET", "/models", nil, &ml); err != nil {
 		fmt.Fprintln(os.Stderr, ansiRed+err.Error()+ansiReset)
 		return 1
 	}
@@ -369,6 +428,39 @@ func cmdModels(cfg Config, asJSON bool) int {
 	return 0
 }
 
+func cmdProvider(cfg Config, asJSON bool) int {
+	var p struct {
+		Object   string   `json:"object"`
+		Provider string   `json:"provider"`
+		Service  string   `json:"service"`
+		BaseURL  string   `json:"base_url"`
+		Auth     string   `json:"auth"`
+		Models   []string `json:"models"`
+		Docs     string   `json:"docs"`
+	}
+	if err := doJSON(cfg, "GET", "/provider", nil, &p); err != nil {
+		fmt.Fprintln(os.Stderr, ansiRed+err.Error()+ansiReset)
+		return 1
+	}
+	if asJSON {
+		b, _ := json.MarshalIndent(p, "", "  ")
+		fmt.Println(string(b))
+		return 0
+	}
+	fmt.Printf("%sprovider%s  %s\n%sservice%s   %s\n%sbase url%s  %s\n%sauth%s      %s (openai-compatible)\n%smodels%s    %d\n%slist%s\n",
+		ansiBold, ansiReset, p.Provider,
+		ansiBold, ansiReset, p.Service,
+		ansiBold, ansiReset, p.BaseURL,
+		ansiBold, ansiReset, p.Auth,
+		ansiBold, ansiReset, len(p.Models),
+		ansiBold, ansiReset)
+	for _, m := range p.Models {
+		fmt.Printf("  %s\n", m)
+	}
+	fmt.Printf("%sdocs%s      %s\n", ansiBold, ansiReset, p.Docs)
+	return 0
+}
+
 func readPrompt(args []string) string {
 	if len(args) > 0 {
 		return strings.Join(args, " ")
@@ -381,8 +473,8 @@ func readPrompt(args []string) string {
 	return ""
 }
 
-func cmdRun(cfg Config, args []string, opts options) int {
-	if !requireKey(cfg) {
+func cmdRun(cfg *Config, args []string, opts options) int {
+	if !ensureKey(cfg) {
 		return 1
 	}
 	prompt := readPrompt(args)
@@ -398,7 +490,7 @@ func cmdRun(cfg Config, args []string, opts options) int {
 	req := CompletionReq{Model: opts.model, Messages: msgs, MaxTokens: opts.maxTokens}
 	if opts.noStream {
 		var out map[string]any
-		if err := doJSON(cfg, "POST", "/chat/completions", req, &out); err != nil {
+		if err := doJSON(*cfg, "POST", "/chat/completions", req, &out); err != nil {
 			fmt.Fprintln(os.Stderr, ansiRed+err.Error()+ansiReset)
 			return 1
 		}
@@ -410,7 +502,7 @@ func cmdRun(cfg Config, args []string, opts options) int {
 		fmt.Println(extractContent(out))
 		return 0
 	}
-	text, err := streamChat(cfg, req, opts.reasoning, os.Stdout)
+	text, err := streamChat(*cfg, req, opts.reasoning, os.Stdout)
 	if err != nil && text == "" {
 		fmt.Fprintln(os.Stderr, ansiRed+err.Error()+ansiReset)
 		return 1
@@ -471,8 +563,8 @@ func parseFlags(cfg *Config, args []string) options {
 	return o
 }
 
-func cmdUsage(cfg Config, asJSON bool) int {
-	if !requireKey(cfg) {
+func cmdUsage(cfg *Config, asJSON bool) int {
+	if !ensureKey(cfg) {
 		return 1
 	}
 	var info struct {
@@ -480,13 +572,13 @@ func cmdUsage(cfg Config, asJSON bool) int {
 		Balance       float64 `json:"balance"`
 		RequestsMonth int     `json:"requests_month"`
 		Usage         []struct {
-			Model     string  `json:"model"`
-			LatencyMS int     `json:"latency_ms"`
-			Status    string  `json:"status"`
-			TS        string  `json:"ts"`
+			Model     string `json:"model"`
+			LatencyMS int    `json:"latency_ms"`
+			Status    string `json:"status"`
+			TS        string `json:"ts"`
 		} `json:"usage"`
 	}
-	if err := doJSON(cfg, "GET", "/key", nil, &info); err != nil {
+	if err := doJSON(*cfg, "GET", "/key", nil, &info); err != nil {
 		fmt.Fprintln(os.Stderr, ansiRed+err.Error()+ansiReset)
 		return 1
 	}
@@ -511,8 +603,8 @@ func cmdUsage(cfg Config, asJSON bool) int {
 	return 0
 }
 
-func cmdChat(cfg Config, opts options) int {
-	if !requireKey(cfg) {
+func cmdChat(cfg *Config, opts options) int {
+	if !ensureKey(cfg) {
 		return 1
 	}
 	model := opts.model
@@ -560,7 +652,7 @@ func cmdChat(cfg Config, opts options) int {
 		msgs = append(msgs, Message{Role: "user", Content: line})
 		fmt.Printf("%s%s%s › ", ansiBlue+ansiBold, brand, ansiReset)
 		req := CompletionReq{Model: model, Messages: msgs, MaxTokens: opts.maxTokens}
-		text, err := streamChat(cfg, req, showReasoning, os.Stdout)
+		text, err := streamChat(*cfg, req, showReasoning, os.Stdout)
 		fmt.Println()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, ansiRed+err.Error()+ansiReset)
@@ -584,11 +676,11 @@ func main() {
 	case "version", "-v", "--version":
 		fmt.Printf("%s %s (%s/%s)\n", brand, version, runtime.GOOS, runtime.GOARCH)
 	case "login":
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: eisencode login <key>")
-			os.Exit(2)
+		key := ""
+		if len(args) > 1 {
+			key = args[1]
 		}
-		os.Exit(cmdLogin(&cfg, args[1]))
+		os.Exit(cmdLogin(&cfg, key))
 	case "logout":
 		cfg.APIKey = ""
 		if err := saveConfig(cfg); err != nil {
@@ -597,19 +689,22 @@ func main() {
 		}
 		fmt.Println("logged out — key removed from", configPath())
 	case "key":
-		os.Exit(cmdKey(cfg))
+		os.Exit(cmdKey(&cfg))
+	case "provider":
+		opts := parseFlags(&cfg, args[1:])
+		os.Exit(cmdProvider(cfg, opts.asJSON))
 	case "models":
 		opts := parseFlags(&cfg, args[1:])
-		os.Exit(cmdModels(cfg, opts.asJSON))
+		os.Exit(cmdModels(&cfg, opts.asJSON))
 	case "usage":
 		opts := parseFlags(&cfg, args[1:])
-		os.Exit(cmdUsage(cfg, opts.asJSON))
+		os.Exit(cmdUsage(&cfg, opts.asJSON))
 	case "run":
 		opts := parseFlags(&cfg, args[1:])
-		os.Exit(cmdRun(cfg, opts.positional, opts))
+		os.Exit(cmdRun(&cfg, opts.positional, opts))
 	case "chat":
 		opts := parseFlags(&cfg, args[1:])
-		os.Exit(cmdChat(cfg, opts))
+		os.Exit(cmdChat(&cfg, opts))
 	default:
 		fmt.Fprintf(os.Stderr, "%sunknown command %q%s\n\n", ansiRed, args[0], ansiReset)
 		cmdHelp()

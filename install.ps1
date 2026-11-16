@@ -29,5 +29,5 @@ if ($userPath -notlike "*$dest*") {
 & $out version
 Write-Host ""
 Write-Host "next:" -ForegroundColor Cyan
-Write-Host "  eisencode login sk_eis_your_key"
+Write-Host "  eisencode login            # prompts for your key"
 Write-Host "  eisencode run `"hello`""

@@ -62,5 +62,5 @@ esac
 
 echo
 say "next:"
-echo "  eisencode login sk_eis_your_key    # key from https://eisencode.waivy.dev/dashboard"
+echo "  eisencode login                    # prompts for your key"
 echo "  eisencode run \"hello\""

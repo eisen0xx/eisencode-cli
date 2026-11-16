@@ -1,6 +1,6 @@
 # eisencode-cli
 
-The official CLI for **eisencode** — 12 models, one OpenAI-style endpoint, your key.
+The official CLI for **eisencode** — 12 models from the **eisenberg-series** provider, one OpenAI-style endpoint, your key.
 
 ```
 https://eisencode.waivy.dev/api/v1
@@ -31,7 +31,7 @@ Or grab a binary from [Releases](https://github.com/eisen0xx/eisencode-cli/relea
 ## Quick start
 
 ```bash
-eisencode login sk_eis_your_key     # from https://eisencode.waivy.dev/dashboard
+eisencode login                # prompts for your key, verifies it, saves it
 eisencode run "explain raft in 3 lines"
 eisencode chat
 ```
@@ -40,14 +40,17 @@ eisencode chat
 
 | Command | What it does |
 |---|---|
-| `eisencode login <key>` | verify + save your key |
+| `eisencode login [key]` | verify + save your key (asks interactively if omitted) |
 | `eisencode logout` | remove the saved key |
-| `eisencode key` | key, plan, balance |
+| `eisencode key` | key, provider, plan, balance |
+| `eisencode provider` | the eisenberg-series provider + base url + models |
 | `eisencode models` | list the 12 models |
 | `eisencode run [prompt]` | one-shot completion (streams, reads stdin if no prompt) |
 | `eisencode chat` | interactive chat (`/model`, `/clear`, `/reasoning`, `/exit`) |
 | `eisencode usage` | recent requests + balance |
 | `eisencode version` | version |
+
+If no key is saved, any command asks for one on a terminal (and saves it). Non-interactive runs print the dashboard link instead. A key with no credits returns `402` and a clear top-up message.
 
 Flags: `--model <id>`, `--system <text>`, `--max-tokens <n>`, `--json`, `--no-stream`, `--reasoning`.
 
