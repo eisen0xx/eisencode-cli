@@ -1,6 +1,6 @@
 # eisencode-cli
 
-The official CLI for **eisencode** — 12 models from the **eisenberg-series** provider, one OpenAI-style endpoint, your key.
+The official CLI for **eisencode** — 11 models from the **eisen** provider, one OpenAI-style endpoint, your key.
 
 ```
 https://eisencode.waivy.dev/api/v1
@@ -43,8 +43,8 @@ eisencode chat
 | `eisencode login [key]` | verify + save your key (asks interactively if omitted) |
 | `eisencode logout` | remove the saved key |
 | `eisencode key` | key, provider, plan, balance |
-| `eisencode provider` | the eisenberg-series provider + base url + models |
-| `eisencode models` | list the 12 models |
+| `eisencode provider` | the eisen provider + base url + models |
+| `eisencode models` | list the 11 models |
 | `eisencode run [prompt]` | one-shot completion (streams, reads stdin if no prompt) |
 | `eisencode chat` | interactive chat (`/model`, `/clear`, `/reasoning`, `/exit`) |
 | `eisencode usage` | recent requests + balance |
@@ -63,7 +63,7 @@ Environment overrides:
 ```bash
 export EISENCODE_API_KEY=sk_eis_...
 export EISENCODE_BASE_URL=https://eisencode.waivy.dev/api/v1
-export EISENCODE_MODEL=eisenberg/glm-5.3-flash
+export EISENCODE_MODEL=E-1-Flash
 ```
 
 ## Use with any OpenAI client
@@ -72,7 +72,7 @@ export EISENCODE_MODEL=eisenberg/glm-5.3-flash
 from openai import OpenAI
 client = OpenAI(base_url="https://eisencode.waivy.dev/api/v1", api_key="sk_eis_...")
 print(client.chat.completions.create(
-    model="eisenberg/glm-5.3-flash",
+    model="E-1-Flash",
     messages=[{"role": "user", "content": "hi"}],
 ).choices[0].message.content)
 ```

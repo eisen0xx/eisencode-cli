@@ -1,5 +1,5 @@
 // eisencode — the official CLI for the eisencode API.
-// 12 models, one endpoint, your key.
+// 11 models, one endpoint, your key.
 package main
 
 import (
@@ -22,7 +22,7 @@ import (
 const (
 	version       = "0.2.0"
 	defaultBase   = "https://eisencode.waivy.dev/api/v1"
-	defaultModel  = "eisenberg/glm-5.3-flash"
+	defaultModel  = "E-1-Flash"
 	brand         = "eisencode"
 	ansiReset     = "\033[0m"
 	ansiBold      = "\033[1m"
@@ -257,8 +257,8 @@ func cmdHelp() {
   eisencode login [key]          save and verify your API key (asks if omitted)
   eisencode logout               remove the saved key
   eisencode key                  show key, plan, balance
-  eisencode provider             show the eisenberg-series provider + base url
-  eisencode models               list the 12 available models
+  eisencode provider             show the eisen provider + base url
+  eisencode models               list the 11 available models
   eisencode run [prompt]        one-shot completion (reads stdin if no prompt)
   eisencode chat                interactive chat
   eisencode usage               recent requests + balance
