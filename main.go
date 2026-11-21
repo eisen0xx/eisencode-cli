@@ -33,6 +33,22 @@ const (
 	ansiClearLine = "\r\033[K"
 )
 
+// builtinModels backs `eisencode provider` when no key is saved yet —
+// the provider is eisen by default and this list is the known catalog.
+var builtinModels = []string{
+	"E-1-Flash",
+	"beam",
+	"deepseek-v4.1-flash",
+	"flint-40b",
+	"hy4-flash",
+	"iceman",
+	"longcat-2.5",
+	"mimo-v2.6-flash",
+	"nemotron-3.5-lightning",
+	"nemotron-3.5-super-vl",
+	"tidepool-alpha",
+}
+
 // ---------- config ----------
 
 // version is a var so release builds can set it with -ldflags "-X main.version=...".
@@ -150,6 +166,8 @@ func errMessage(data []byte, status int) string {
 		return "invalid or revoked key — run: eisencode login"
 	case 402:
 		return "no credits on this key — top up at https://eisencode.waivy.dev/dashboard"
+	case 404:
+		return "model not found on the endpoint — run: eisencode models for the live ids"
 	case 429:
 		return "rate limited — slow down (30 req/min per key)"
 	}
@@ -450,6 +468,46 @@ func cmdModels(cfg *Config, asJSON bool) int {
 }
 
 func cmdProvider(cfg Config, asJSON bool) int {
+	// without a key the provider is still knowable — it is baked in.
+	// answer offline instead of making the user hit an auth error.
+	if strings.TrimSpace(cfg.APIKey) == "" {
+		offline := struct {
+			Object   string   `json:"object"`
+			Provider string   `json:"provider"`
+			Service  string   `json:"service"`
+			BaseURL  string   `json:"base_url"`
+			Auth     string   `json:"auth"`
+			Models   []string `json:"models"`
+			Docs     string   `json:"docs"`
+		}{
+			Object:   "provider",
+			Provider: "eisen",
+			Service:  "eisencode",
+			BaseURL:  cfg.BaseURL,
+			Auth:     "Authorization: Bearer sk_eis_...",
+			Models:   builtinModels,
+			Docs:     "https://eisencode.waivy.dev/docs",
+		}
+		if asJSON {
+			b, _ := json.MarshalIndent(offline, "", "  ")
+			fmt.Println(string(b))
+			return 0
+		}
+		fmt.Printf("%sprovider%s  %s\n%sservice%s   %s\n%sbase url%s  %s\n%sauth%s      %s (openai-compatible)\n%smodels%s    %d\n%slist%s\n",
+			ansiBold, ansiReset, offline.Provider,
+			ansiBold, ansiReset, offline.Service,
+			ansiBold, ansiReset, offline.BaseURL,
+			ansiBold, ansiReset, offline.Auth,
+			ansiBold, ansiReset, len(offline.Models),
+			ansiBold, ansiReset)
+		for _, m := range offline.Models {
+			fmt.Printf("  %s\n", m)
+		}
+		fmt.Printf("%sdocs%s      %s\n%s%s\n",
+			ansiBold, ansiReset, offline.Docs,
+			ansiDim, "this is the built-in provider — run: eisencode login <key> for live data")
+		return 0
+	}
 	var p struct {
 		Object   string   `json:"object"`
 		Provider string   `json:"provider"`
