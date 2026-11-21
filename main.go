@@ -20,7 +20,6 @@ import (
 )
 
 const (
-	version       = "0.2.0"
 	defaultBase   = "https://eisencode.waivy.dev/api/v1"
 	defaultModel  = "E-1-Flash"
 	brand         = "eisencode"
@@ -36,13 +35,21 @@ const (
 
 // ---------- config ----------
 
+// version is a var so release builds can set it with -ldflags "-X main.version=...".
+var version = "0.3.0"
+
 type Config struct {
-	APIKey  string `json:"api_key"`
-	BaseURL string `json:"base_url"`
-	Model   string `json:"model"`
+	APIKey      string            `json:"api_key"`
+	BaseURL     string            `json:"base_url"`
+	Model       string            `json:"model"`
+	Keybinds    map[string]string `json:"keybinds,omitempty"`
+	OpenCodeBin string            `json:"opencode_bin,omitempty"`
 }
 
 func configPath() string {
+	if v := strings.TrimSpace(os.Getenv("EISENCODE_HOME")); v != "" {
+		return filepath.Join(v, "config.json")
+	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		dir = "."
@@ -259,23 +266,37 @@ func cmdHelp() {
   eisencode key                  show key, plan, balance
   eisencode provider             show the eisen provider + base url
   eisencode models               list the 11 available models
-  eisencode run [prompt]        one-shot completion (reads stdin if no prompt)
-  eisencode chat                interactive chat
-  eisencode usage               recent requests + balance
-  eisencode version             print version
+  eisencode run [prompt]         one-shot completion (reads stdin if no prompt)
+  eisencode chat                 interactive chat with isolated sessions
+  eisencode sessions [list]      your eisen sessions (--source eisen|opencode|all, --dir P)
+  eisencode sessions show <id>   print a session (--md or --json)
+  eisencode sessions rm <id>     delete a session
+  eisencode sessions rename <id> <title>
+  eisencode sessions export <id> opencode-importable file (--out FILE, --import)
+  eisencode search <query>       search sessions (--in eisen|opencode|all, --dir P)
+  eisencode keys                 show chat keybinds
+  eisencode completion <shell>   bash|zsh|fish|powershell
+  eisencode logo                 print the EISEN CODE wordmark
+  eisencode usage                recent requests + balance
+  eisencode version              print version
 
 %sOPTIONS%s
-  --model <id>                  model to use (default %s)
-  --system <text>               system prompt (run/chat)
-  --max-tokens <n>              cap response length
-  --json                        raw JSON output (run/models/usage)
-  --no-stream                   wait for the full answer, print once
-  --reasoning                   show the model's reasoning (chat: /reasoning)
+  --model <id>                   model to use (default %s)
+  --system <text>                system prompt (run/chat)
+  --max-tokens <n>               cap response length
+  --session <id>                 resume an eisen session (chat)
+  --new                          force a new session (chat)
+  --no-save                      do not persist the session (chat)
+  --json                         raw JSON output
+  --no-stream                    wait for the full answer, print once
+  --reasoning                    show the model's reasoning (chat: /reasoning)
 
 %sENV%s
-  EISENCODE_API_KEY             key (overrides config)
-  EISENCODE_BASE_URL            API base (default %s)
-  EISENCODE_MODEL               default model
+  EISENCODE_API_KEY              key (overrides config)
+  EISENCODE_BASE_URL             API base (default %s)
+  EISENCODE_MODEL                default model
+  EISENCODE_HOME                 override the private state dir
+  EISENCODE_OPENCODE_BIN         path to opencode (exports/search)
 
 %sCONFIG%s %s
 `, ansiBlue, ansiReset, version,
@@ -529,6 +550,9 @@ type options struct {
 	asJSON     bool
 	noStream   bool
 	reasoning  bool
+	sessionID  string
+	newSession bool
+	noSave     bool
 	positional []string
 }
 
@@ -550,6 +574,12 @@ func parseFlags(cfg *Config, args []string) options {
 			o.system = next()
 		case "--max-tokens":
 			fmt.Sscanf(next(), "%d", &o.maxTokens)
+		case "--session":
+			o.sessionID = next()
+		case "--new":
+			o.newSession = true
+		case "--no-save":
+			o.noSave = true
 		case "--json":
 			o.asJSON = true
 		case "--no-stream":
@@ -603,63 +633,186 @@ func cmdUsage(cfg *Config, asJSON bool) int {
 	return 0
 }
 
+func sessionToMessages(s *Session) []Message {
+	out := make([]Message, 0, len(s.Messages)+1)
+	if s.System != "" {
+		out = append(out, Message{Role: "system", Content: s.System})
+	}
+	for _, m := range s.Messages {
+		if m.Role == "system" {
+			continue
+		}
+		out = append(out, Message{Role: m.Role, Content: m.Content})
+	}
+	return out
+}
+
+func persistSession(s *Session, opts options) {
+	if opts.noSave {
+		return
+	}
+	if err := saveSession(s); err != nil {
+		fmt.Fprintln(os.Stderr, ansiDim+"could not save session: "+err.Error()+ansiReset)
+	}
+}
+
+func handleChatCommand(cfg *Config, s *Session, line string, showReasoning *bool, opts options) (bool, bool) {
+	switch {
+	case line == "/exit" || line == "/quit":
+		return true, true
+	case line == "/clear":
+		s.Messages = nil
+		s.Title = "untitled"
+		persistSession(s, opts)
+		fmt.Println(ansiDim + "context cleared" + ansiReset)
+		return true, false
+	case line == "/reasoning":
+		*showReasoning = !*showReasoning
+		fmt.Printf(ansiDim+"reasoning %v"+ansiReset+"\n", *showReasoning)
+		return true, false
+	case line == "/model":
+		fmt.Printf(ansiDim+"model %s"+ansiReset+"\n", s.Model)
+		return true, false
+	case strings.HasPrefix(line, "/model "):
+		s.Model = strings.TrimSpace(strings.TrimPrefix(line, "/model "))
+		persistSession(s, opts)
+		fmt.Printf(ansiDim+"model → %s"+ansiReset+"\n", s.Model)
+		return true, false
+	case line == "/sessions":
+		sessions, _ := listSessions()
+		if len(sessions) == 0 {
+			fmt.Println(ansiDim + "no other sessions yet" + ansiReset)
+		}
+		for i, row := range sessions {
+			if i >= 10 {
+				break
+			}
+			mark := "  "
+			if row.ID == s.ID {
+				mark = ansiBlue + "→ " + ansiReset
+			}
+			fmt.Printf("%s%s  %-16s %s\n", mark, row.ID,
+				time.UnixMilli(row.Updated).Local().Format("2006-01-02 15:04"), row.Title)
+		}
+		return true, false
+	case line == "/new":
+		persistSession(s, opts)
+		*s = Session{ID: newSessionID(), Title: "untitled", Model: s.Model, System: s.System, Source: sessionSource}
+		fmt.Printf(ansiDim+"new session %s"+ansiReset+"\n", s.ID)
+		return true, false
+	case strings.HasPrefix(line, "/title "):
+		s.Title = strings.TrimSpace(strings.TrimPrefix(line, "/title "))
+		persistSession(s, opts)
+		fmt.Println(ansiDim + "title → " + s.Title + ansiReset)
+		return true, false
+	case line == "/export":
+		persistSession(s, opts)
+		path, err := writeOpenCodeExport(s, "", "")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, ansiRed+err.Error()+ansiReset)
+			return true, false
+		}
+		fmt.Printf("%swrote %s%s\n%simport:%s opencode session import %s\n",
+			ansiDim, path, ansiReset, ansiDim, ansiReset, path)
+		return true, false
+	case strings.HasPrefix(line, "/search "):
+		q := strings.TrimSpace(strings.TrimPrefix(line, "/search "))
+		hits := searchSessions(q, 10)
+		if len(hits) == 0 {
+			fmt.Println(ansiDim + "no matches" + ansiReset)
+		}
+		for _, h := range hits {
+			fmt.Printf("  %-16s %s  %s\n", h.ID, h.When, h.Title)
+		}
+		return true, false
+	case line == "/help":
+		fmt.Println(ansiDim + "/exit  /clear  /model <id>  /reasoning  /sessions  /new  /title <t>  /export  /search <q>" + ansiReset)
+		return true, false
+	case strings.HasPrefix(line, "/"):
+		fmt.Println(ansiDim + "unknown command — /help for the list" + ansiReset)
+		return true, false
+	}
+	return false, false
+}
+
 func cmdChat(cfg *Config, opts options) int {
 	if !ensureKey(cfg) {
 		return 1
 	}
-	model := opts.model
-	msgs := []Message{}
-	if opts.system != "" {
-		msgs = append(msgs, Message{Role: "system", Content: opts.system})
+	var s *Session
+	if opts.sessionID != "" && !opts.newSession {
+		loaded, err := loadSession(opts.sessionID)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, ansiRed+err.Error()+ansiReset)
+			return 1
+		}
+		s = loaded
+		if s.Model == "" {
+			s.Model = opts.model
+		}
+		fmt.Printf("%sresumed%s %s  %s\n", ansiDim, ansiReset, s.ID, s.Title)
+	} else {
+		s = &Session{ID: newSessionID(), Title: "untitled", Model: opts.model, Source: sessionSource}
 	}
+	if opts.system != "" {
+		s.System = opts.system
+	}
+
 	showReasoning := opts.reasoning
-	fmt.Printf("%seisencode%s chat — model %s%s%s\n", ansiBlue+ansiBold, ansiReset, ansiBold, model, ansiReset)
-	fmt.Println(ansiDim + "/exit  /clear  /model <id>  /reasoning  /help" + ansiReset)
-	in := bufio.NewScanner(os.Stdin)
-	in.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	fmt.Printf("%seisencode%s chat — model %s%s%s  session %s%s%s\n",
+		ansiBlue+ansiBold, ansiReset, ansiBold, s.Model, ansiReset, ansiDim, s.ID, ansiReset)
+	fmt.Println(ansiDim + "/exit  /clear  /model <id>  /reasoning  /sessions  /new  /title <t>  /export  /search <q>  /help" + ansiReset)
+	fmt.Printf("%senter send · ctrl+c cancel · ctrl+d exit · ctrl+l clear · up/down history · eisencode keys%s\n",
+		ansiDim, ansiReset)
+
+	editor := newEditor(*cfg, ansiBlue+"you"+ansiReset+" › ", os.Stdout)
 	for {
-		fmt.Printf("\n%syou%s › ", ansiBlue, ansiReset)
-		if !in.Scan() {
-			fmt.Println()
+		line, err := editor.readLine()
+		if err == errEditorEOF || err == errEditorCancel {
+			if !opts.noSave {
+				fmt.Printf("%ssession %s%s%s\n", ansiDim, s.ID, ansiReset, "")
+			}
 			return 0
 		}
-		line := strings.TrimSpace(in.Text())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, ansiRed+err.Error()+ansiReset)
+			return 1
+		}
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		switch {
-		case line == "/exit" || line == "/quit":
-			return 0
-		case line == "/clear":
-			msgs = msgs[:0]
-			if opts.system != "" {
-				msgs = append(msgs, Message{Role: "system", Content: opts.system})
+		if strings.HasPrefix(line, "/") {
+			handled, quit := handleChatCommand(cfg, s, line, &showReasoning, opts)
+			if quit {
+				if !opts.noSave {
+					fmt.Printf("%ssession %s%s\n", ansiDim, s.ID, ansiReset)
+				}
+				return 0
 			}
-			fmt.Println(ansiDim + "context cleared" + ansiReset)
-			continue
-		case line == "/reasoning":
-			showReasoning = !showReasoning
-			fmt.Printf(ansiDim+"reasoning %v"+ansiReset+"\n", showReasoning)
-			continue
-		case strings.HasPrefix(line, "/model "):
-			model = strings.TrimSpace(strings.TrimPrefix(line, "/model "))
-			fmt.Printf(ansiDim+"model → %s"+ansiReset+"\n", model)
-			continue
-		case line == "/help":
-			fmt.Println(ansiDim + "/exit  /clear  /model <id>  /reasoning" + ansiReset)
-			continue
+			if handled {
+				continue
+			}
 		}
-		msgs = append(msgs, Message{Role: "user", Content: line})
+		s.Messages = append(s.Messages, SessionMessage{
+			Role: "user", Content: line, Time: time.Now().UnixMilli(),
+		})
+		if s.Title == "" || s.Title == "untitled" {
+			s.Title = sessionTitle(line)
+		}
 		fmt.Printf("%s%s%s › ", ansiBlue+ansiBold, brand, ansiReset)
-		req := CompletionReq{Model: model, Messages: msgs, MaxTokens: opts.maxTokens}
+		req := CompletionReq{Model: s.Model, Messages: sessionToMessages(s), MaxTokens: opts.maxTokens}
 		text, err := streamChat(*cfg, req, showReasoning, os.Stdout)
 		fmt.Println()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, ansiRed+err.Error()+ansiReset)
-			msgs = msgs[:len(msgs)-1]
+			s.Messages = s.Messages[:len(s.Messages)-1]
 			continue
 		}
-		msgs = append(msgs, Message{Role: "assistant", Content: text})
+		s.Messages = append(s.Messages, SessionMessage{
+			Role: "assistant", Content: text, Time: time.Now().UnixMilli(),
+		})
+		persistSession(s, opts)
 	}
 }
 
@@ -705,6 +858,22 @@ func main() {
 	case "chat":
 		opts := parseFlags(&cfg, args[1:])
 		os.Exit(cmdChat(&cfg, opts))
+	case "sessions", "session":
+		os.Exit(cmdSessions(&cfg, args[1:]))
+	case "search", "find":
+		os.Exit(cmdSearch(&cfg, args[1:]))
+	case "keys", "keybinds":
+		opts := parseFlags(&cfg, args[1:])
+		os.Exit(cmdKeys(&cfg, opts.asJSON))
+	case "completion", "completions":
+		shell := ""
+		if len(args) > 1 {
+			shell = args[1]
+		}
+		os.Exit(cmdCompletion(shell))
+	case "logo", "brand":
+		opts := parseFlags(&cfg, args[1:])
+		os.Exit(cmdLogo(opts.asJSON))
 	default:
 		fmt.Fprintf(os.Stderr, "%sunknown command %q%s\n\n", ansiRed, args[0], ansiReset)
 		cmdHelp()

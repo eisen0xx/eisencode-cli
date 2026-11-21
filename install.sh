@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # eisencode installer — https://eisencode.waivy.dev
+#
+# Installs the standalone eisencode CLI. It does not need or modify opencode.
 set -euo pipefail
 
 REPO="eisen0xx/eisencode-cli"
@@ -60,7 +62,23 @@ case ":$PATH:" in
      say "  export PATH=\"$DEST:\$PATH\"" ;;
 esac
 
+# Shell completion — printed only, never edits your dotfiles silently.
+SHELL_NAME="$(basename "${SHELL:-}")"
+case "$SHELL_NAME" in
+  bash) COMPLETION="eisencode completion bash >> ~/.bashrc" ;;
+  zsh)  COMPLETION="eisencode completion zsh > \"\${fpath[1]}/_eisencode\"" ;;
+  fish) COMPLETION="mkdir -p ~/.config/fish/completions && eisencode completion fish > ~/.config/fish/completions/eisencode.fish" ;;
+  *)    COMPLETION="eisencode completion bash   # or zsh | fish | powershell" ;;
+esac
+
 echo
 say "next:"
 echo "  eisencode login                    # prompts for your key"
 echo "  eisencode run \"hello\""
+echo "  eisencode chat                     # isolated sessions, /help inside"
+echo
+say "shell completion ($SHELL_NAME):"
+echo "  $COMPLETION"
+echo
+say "optional: hand a session to opencode (only if installed):"
+echo "  eisencode sessions export <id> --import"
